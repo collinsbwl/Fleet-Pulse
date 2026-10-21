@@ -1,0 +1,23 @@
+# Binaries
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+coverage.*
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Profiles and local output
+*.pprof
+/tmp/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
