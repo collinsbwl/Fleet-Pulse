@@ -1,0 +1,76 @@
+name: fleet-pulse
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --default-log-level=info
+    ports:
+      - "19092:19092" # Kafka API for host-side clients
+      - "9644:9644"   # Admin API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot job: creates topics, then exits. Safe to re-run.
+  # In the "init" profile so `up` skips it; run it with `make topics`.
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    profiles: ["init"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        rpk topic create positions -X brokers=redpanda:9092
+        --partitions 6 --replicas 1
+        --topic-config retention.ms=3600000
+        || rpk topic describe positions -X brokers=redpanda:9092
+    restart: "no"
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v3.12.0
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8081:8080"
+
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      # Local development credentials only.
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+      POSTGRES_DB: fleet
+    ports:
+      - "5432:5432"
+    volumes:
+      # Postgres 18 images keep data under /var/lib/postgresql/<major>/, so mount the parent.
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  redpanda-data:
+  postgres-data:
