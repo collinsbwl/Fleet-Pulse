@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package fleetpulse.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/collinsbwl/Fleet-Pulse/internal/pb/fleetpulse/v1;fleetpulsev1";
+
+// Position is one telemetry reading from one vehicle. It is the value of every
+// record on the `positions` topic; the record key is vehicle_id.
+message Position {
+  string vehicle_id = 1;
+  // When the vehicle took the reading. Freshness is measured from here.
+  google.protobuf.Timestamp event_time = 2;
+  double lat = 3;
+  double lon = 4;
+  float speed_kph = 5;
+  float fuel_pct = 6;
+  float engine_temp_c = 7;
+}

@@ -2,8 +2,10 @@
 
 GO_PKGS := ./...
 COMPOSE := docker compose -f deploy/docker-compose.yml
+BUF := docker run --rm --user "$$(id -u):$$(id -g)" -e BUF_CACHE_DIR=/tmp/buf \
+	-v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.73.0
 
-.PHONY: help build test fmt check up down topics psql
+.PHONY: help build test fmt check proto up down topics psql
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -22,6 +24,10 @@ check: ## Vet, test and check formatting (must pass before every commit)
 	if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
 	go vet $(GO_PKGS)
 	go test $(GO_PKGS)
+
+proto: ## Lint .proto files and regenerate Go code into internal/pb
+	$(BUF) lint
+	$(BUF) generate
 
 up: ## Start the stack and create topics
 	$(COMPOSE) up -d --wait
