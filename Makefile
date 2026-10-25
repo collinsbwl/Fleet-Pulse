@@ -5,7 +5,9 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 BUF := docker run --rm --user "$$(id -u):$$(id -g)" -e BUF_CACHE_DIR=/tmp/buf \
 	-v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.73.0
 
-.PHONY: help build test fmt check proto up down topics psql
+VEHICLES ?= 1000
+
+.PHONY: help build test fmt check proto sim up down topics psql
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -28,6 +30,9 @@ check: ## Vet, test and check formatting (must pass before every commit)
 proto: ## Lint .proto files and regenerate Go code into internal/pb
 	$(BUF) lint
 	$(BUF) generate
+
+sim: ## Run the simulator on the host (VEHICLES=1000); Ctrl-C to stop
+	go run ./cmd/simulator -vehicles $(VEHICLES)
 
 up: ## Start the stack and create topics
 	$(COMPOSE) up -d --wait
