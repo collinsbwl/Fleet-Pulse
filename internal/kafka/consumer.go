@@ -41,24 +41,34 @@ func NewConsumer(ctx context.Context, brokers []string, group, topic string, ext
 
 // Poll waits for records and returns at most max of them.
 //
-// It returns ctx's error when ctx ends and kgo.ErrClientClosed after Close.
-// Other fetch problems (a partition leader moving, a broker restarting) are
-// usually temporary, so Poll may return records and a non-nil error together:
-// log the error and keep going.
+// It returns ctx's error when ctx ends before any record arrives and
+// kgo.ErrClientClosed after Close. Other fetch problems (a partition leader
+// moving, a broker restarting) are usually temporary, so Poll may return
+// records and a non-nil error together: log the error and keep going.
+//
+// Records that come back are always returned, even if ctx expired a moment
+// later. The client has already handed them over and counts them as consumed,
+// so discarding them would lose them.
 func (c *Consumer) Poll(ctx context.Context, max int) ([]*kgo.Record, error) {
-	fetches := c.client.PollRecords(ctx, max)
+	return resolve(c.client.PollRecords(ctx, max), ctx.Err())
+}
+
+// resolve turns a poll result into records plus an error. ctxErr is the poll
+// context's error as seen after the poll returned.
+func resolve(fetches kgo.Fetches, ctxErr error) ([]*kgo.Record, error) {
 	if fetches.IsClientClosed() {
 		return nil, kgo.ErrClientClosed
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	recs := fetches.Records()
+	if len(recs) == 0 && ctxErr != nil {
+		return nil, ctxErr
 	}
 
 	var errs []error
 	fetches.EachError(func(topic string, partition int32, err error) {
 		errs = append(errs, fmt.Errorf("fetching %s/%d: %w", topic, partition, err))
 	})
-	return fetches.Records(), errors.Join(errs...)
+	return recs, errors.Join(errs...)
 }
 
 // Commit records that everything up to and including recs has been handled.
