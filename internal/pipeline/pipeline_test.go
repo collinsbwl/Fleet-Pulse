@@ -369,3 +369,135 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("want 1000 records / 250ms, got %d / %v", o.MaxBatch, o.FlushEvery)
 	}
 }
+
+// ---- shutdown ----
+
+func TestShutdownFlushesTheBufferedBatch(t *testing.T) {
+	src := &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}
+	sink := newSink()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := New(src, sink, quiet, Options{MaxBatch: 1000, FlushEvery: time.Hour})
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond) // both records are now buffered, far from a full batch
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+
+	if got := sink.sizes(); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("the buffered batch should be written on shutdown, got %v", got)
+	}
+	if src.commits() != 1 {
+		t.Errorf("the final batch should be committed, got %d commits", src.commits())
+	}
+	if p.Stats().Written != 2 {
+		t.Errorf("want 2 written, got %d", p.Stats().Written)
+	}
+}
+
+func TestShutdownGivesUpWhenTheFinalWriteKeepsFailing(t *testing.T) {
+	src := &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}
+	sink := newSink()
+	for range 1000 {
+		sink.fail = append(sink.fail, errors.New("db down"))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := New(src, sink, quiet, Options{
+		MaxBatch: 1000, FlushEvery: time.Hour,
+		RetryBackoff: time.Millisecond, ShutdownFlush: 80 * time.Millisecond,
+	})
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown must be bounded by ShutdownFlush even when the database is down")
+	}
+	if src.commits() != 0 {
+		t.Errorf("a batch that was never written must not be committed, got %d commits", src.commits())
+	}
+}
+
+// slowSink blocks inside WriteBatch until released, like a write in flight.
+type slowSink struct {
+	started chan struct{}
+	release chan struct{}
+
+	mu          sync.Mutex
+	ctxErrAtEnd error
+	batchesDone int
+}
+
+func (s *slowSink) WriteBatch(ctx context.Context, _ []*fleetpulsev1.Position) error {
+	s.started <- struct{}{}
+	<-s.release
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ctxErrAtEnd = ctx.Err()
+	s.batchesDone++
+	return nil
+}
+
+func TestShutdownLetsAWriteInFlightFinish(t *testing.T) {
+	src := &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}
+	sink := &slowSink{started: make(chan struct{}, 1), release: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := New(src, sink, quiet, Options{MaxBatch: 2, FlushEvery: time.Hour})
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	<-sink.started // the batch is full and its write is under way
+	cancel()       // shutdown begins mid-write
+	time.Sleep(30 * time.Millisecond)
+	close(sink.release)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.ctxErrAtEnd != nil {
+		t.Errorf("shutdown must not cancel a write already running, but its context ended with %v", sink.ctxErrAtEnd)
+	}
+	if src.commits() != 1 {
+		t.Errorf("the finished write should be committed, got %d commits", src.commits())
+	}
+}
+
+func TestShutdownWithNothingBufferedIsQuick(t *testing.T) {
+	src := &fakeSource{}
+	sink := newSink()
+	ctx, cancel := context.WithCancel(context.Background())
+	p := New(src, sink, quiet, Options{})
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("an idle pipeline should stop at once")
+	}
+	if len(sink.sizes()) != 0 || src.commits() != 0 {
+		t.Errorf("nothing should be written or committed when nothing was buffered")
+	}
+}

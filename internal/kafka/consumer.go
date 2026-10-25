@@ -82,6 +82,14 @@ func (c *Consumer) Commit(ctx context.Context, recs []*kgo.Record) error {
 	return nil
 }
 
+// Ping reports whether a broker answers. The server's readiness check uses it.
+func (c *Consumer) Ping(ctx context.Context) error {
+	if err := c.client.Ping(ctx); err != nil {
+		return fmt.Errorf("pinging kafka brokers: %w", err)
+	}
+	return nil
+}
+
 // Close leaves the group, so its partitions move to another member quickly.
 func (c *Consumer) Close() {
 	c.client.Close()

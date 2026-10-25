@@ -82,6 +82,11 @@ services:
       args:
         SERVICE: server
     restart: unless-stopped
+    # Worst case on SIGTERM: a write under way (5 s) + final flush (5 s) + http
+    # shutdown (3 s). Docker's default 10 s would sometimes kill it mid-flush.
+    stop_grace_period: 20s
+    ports:
+      - "8080:8080"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -90,6 +95,13 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
       POSTGRES_DSN: postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable
+    healthcheck:
+      # Ready means Postgres and Redpanda are both reachable. wget is in the Alpine image.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+      start_period: 10s
 
   simulator:
     image: fleet-pulse/simulator:dev

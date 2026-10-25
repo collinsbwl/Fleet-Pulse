@@ -34,6 +34,13 @@ type Options struct {
 	RetryBackoff time.Duration // first wait after a failed write; doubles up to 10s (default 1s)
 	CommitWait   time.Duration // time allowed for one commit (default 10s)
 	StatsEvery   time.Duration // how often to log throughput (default 5s)
+
+	// WriteTimeout bounds one write attempt. A write already running when
+	// shutdown starts is allowed to finish, up to this long (default 5s).
+	WriteTimeout time.Duration
+	// ShutdownFlush bounds the final flush of the buffered batch (default 5s).
+	// Docker waits 10 s after SIGTERM before killing the container.
+	ShutdownFlush time.Duration
 }
 
 func (o *Options) setDefaults() {
@@ -51,6 +58,12 @@ func (o *Options) setDefaults() {
 	}
 	if o.StatsEvery <= 0 {
 		o.StatsEvery = 5 * time.Second
+	}
+	if o.WriteTimeout <= 0 {
+		o.WriteTimeout = 5 * time.Second
+	}
+	if o.ShutdownFlush <= 0 {
+		o.ShutdownFlush = 5 * time.Second
 	}
 }
 
@@ -81,8 +94,10 @@ func New(src Source, sink Sink, log *slog.Logger, opts Options) *Pipeline {
 // Stats returns the counters. Call it only after Run has returned.
 func (p *Pipeline) Stats() Stats { return p.stats }
 
-// Run loops until ctx ends, then returns nil. Anything buffered but not yet
-// written is left uncommitted, so it is redelivered after a restart.
+// Run loops until ctx ends, then stops reading, makes a final attempt to write
+// and commit whatever is buffered (bounded by Options.ShutdownFlush), and
+// returns nil. A batch that could not be written is left uncommitted, so it is
+// redelivered after a restart.
 func (p *Pipeline) Run(ctx context.Context) error {
 	var (
 		recs      []*kgo.Record // every polled record, for the commit
@@ -102,16 +117,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		got, err := p.src.Poll(pollCtx, p.opts.MaxBatch-len(recs))
 		cancel()
 
-		if ctx.Err() != nil || errors.Is(err, kgo.ErrClientClosed) {
-			return nil
-		}
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		stopping := ctx.Err() != nil || errors.Is(err, kgo.ErrClientClosed)
+		if err != nil && !stopping && !errors.Is(err, context.DeadlineExceeded) {
 			p.log.Warn("fetch problem", "error", err)
 			if len(got) == 0 {
 				sleep(ctx, 100*time.Millisecond) // don't spin on a persistent error
 			}
 		}
 
+		// Keep records that arrived even on the way out: the client has already
+		// counted them as consumed.
 		if len(got) > 0 {
 			if len(recs) == 0 {
 				firstAt = time.Now()
@@ -120,6 +135,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			decoded, dropped := decode(p.log, got)
 			positions = append(positions, decoded...)
 			p.stats.Dropped += uint64(dropped)
+		}
+
+		if stopping {
+			p.drain(ctx, recs, positions)
+			return nil
 		}
 
 		if len(recs) >= p.opts.MaxBatch || (len(recs) > 0 && time.Since(firstAt) >= p.opts.FlushEvery) {
@@ -147,7 +167,11 @@ func (p *Pipeline) flush(ctx context.Context, recs []*kgo.Record, positions []*f
 	backoff := p.opts.RetryBackoff
 	for {
 		start := time.Now()
-		err := p.sink.WriteBatch(ctx, positions)
+		// ctx decides whether to try again, not whether a write already under
+		// way may finish: cancelling it mid-write would roll the batch back.
+		writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), p.opts.WriteTimeout)
+		err := p.sink.WriteBatch(writeCtx, positions)
+		cancelWrite()
 		if err == nil {
 			p.stats.Written += uint64(len(positions))
 			p.stats.Batches++
@@ -175,6 +199,24 @@ func (p *Pipeline) flush(ctx context.Context, recs []*kgo.Record, positions []*f
 		p.log.Warn("commit failed; records will be redelivered", "error", err)
 	}
 	return true
+}
+
+// drain is the last step of a shutdown: write and commit what is buffered, within
+// Options.ShutdownFlush. If that fails the batch stays uncommitted and is
+// redelivered on the next start.
+func (p *Pipeline) drain(ctx context.Context, recs []*kgo.Record, positions []*fleetpulsev1.Position) {
+	if len(recs) == 0 {
+		p.log.Info("shutting down; nothing buffered to flush")
+		return
+	}
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.opts.ShutdownFlush)
+	defer cancel()
+
+	if p.flush(flushCtx, recs, positions) {
+		p.log.Info("shutting down; final batch flushed", "records", len(recs), "positions", len(positions))
+		return
+	}
+	p.log.Warn("shutting down; final batch not written and left uncommitted for redelivery", "records", len(recs))
 }
 
 // decode turns records into positions. A record that is not valid Protobuf, or
