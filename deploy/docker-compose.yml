@@ -71,6 +71,41 @@ services:
       timeout: 5s
       retries: 20
 
+  # The Go services are built from ./deploy/Dockerfile. Inside Compose they reach
+  # Redpanda and Postgres by service name, not localhost. `make up` starts them
+  # after redpanda-init has created the topic.
+  server:
+    image: fleet-pulse/server:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        SERVICE: server
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      POSTGRES_DSN: postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable
+
+  simulator:
+    image: fleet-pulse/simulator:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        SERVICE: simulator
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      SIM_VEHICLES: ${VEHICLES:-1000}
+
 volumes:
   redpanda-data:
   postgres-data:
