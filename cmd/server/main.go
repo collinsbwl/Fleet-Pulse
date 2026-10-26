@@ -30,8 +30,9 @@ const (
 // The pipeline depends on interfaces; these fail the build if the real
 // consumer or store stops satisfying them.
 var (
-	_ pipeline.Source = (*kafka.Consumer)(nil)
-	_ pipeline.Sink   = (*store.Store)(nil)
+	_ pipeline.Source       = (*kafka.Consumer)(nil)
+	_ pipeline.Sink         = (*store.Store)(nil)
+	_ httpapi.VehicleSource = (*store.Store)(nil)
 )
 
 func main() {
@@ -80,6 +81,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	health.Register(mux)
+	httpapi.RegisterVehicles(mux, db, log)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	httpErr := make(chan error, 1)

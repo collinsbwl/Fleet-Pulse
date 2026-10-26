@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +317,75 @@ func TestRetryable(t *testing.T) {
 				t.Errorf("retryable(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---- Latest ----
+
+// ours keeps only this test's vehicles: the table also holds the running
+// simulator's rows.
+func ours(vs []Vehicle, prefix string) []Vehicle {
+	var out []Vehicle
+	for _, v := range vs {
+		if strings.HasPrefix(v.ID, prefix) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func TestLatestReturnsEachVehicleOnceWithItsNewestReading(t *testing.T) {
+	s, prefix := testStore(t)
+	ctx := context.Background()
+
+	err := s.WriteBatch(ctx, []*fleetpulsev1.Position{
+		{VehicleId: prefix + "b", EventTime: timestamppb.New(t0), Lat: 51.1, Lon: -0.1, SpeedKph: 10, FuelPct: 90, EngineTempC: 80},
+		{VehicleId: prefix + "a", EventTime: timestamppb.New(t0), Lat: 51.2, Lon: -0.2, SpeedKph: 20.5, FuelPct: 70.25, EngineTempC: 91.5},
+		{VehicleId: prefix + "a", EventTime: timestamppb.New(t0.Add(5 * time.Second)), Lat: 51.3, Lon: -0.3, SpeedKph: 30, FuelPct: 69, EngineTempC: 92},
+	})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	all, err := s.Latest(ctx)
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	got := ours(all, prefix)
+
+	if len(got) != 2 {
+		t.Fatalf("want 2 vehicles, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != prefix+"a" || got[1].ID != prefix+"b" {
+		t.Errorf("want results ordered by ID, got %s then %s", got[0].ID, got[1].ID)
+	}
+	a := got[0]
+	if !a.EventTime.Equal(t0.Add(5*time.Second)) || a.EventTime.Location() != time.UTC {
+		t.Errorf("a: want its newest reading in UTC, got %v (%v)", a.EventTime, a.EventTime.Location())
+	}
+	if a.Lat != 51.3 || a.Lon != -0.3 || a.SpeedKph != 30 || a.FuelPct != 69 || a.EngineTempC != 92 {
+		t.Errorf("a: values do not match the newest reading: %+v", a)
+	}
+}
+
+func TestLatestNeverReturnsNil(t *testing.T) {
+	s, _ := testStore(t)
+
+	all, err := s.Latest(context.Background())
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if all == nil {
+		t.Fatal("want an empty slice, not nil, so JSON encodes [] instead of null")
+	}
+}
+
+func TestLatestRespectsContext(t *testing.T) {
+	s, _ := testStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := s.Latest(ctx); err == nil {
+		t.Fatal("want an error for a cancelled context")
 	}
 }
