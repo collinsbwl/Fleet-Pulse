@@ -20,6 +20,7 @@ import (
 	"github.com/collinsbwl/Fleet-Pulse/internal/pipeline"
 	"github.com/collinsbwl/Fleet-Pulse/internal/store"
 	"github.com/collinsbwl/Fleet-Pulse/internal/telemetry"
+	"github.com/collinsbwl/Fleet-Pulse/internal/ws"
 )
 
 const (
@@ -82,6 +83,9 @@ func run() error {
 	mux := http.NewServeMux()
 	health.Register(mux)
 	httpapi.RegisterVehicles(mux, db, log)
+	// Nothing broadcasts to the hub yet; T15 connects the pipeline to it.
+	hub := ws.NewHub(log, ws.Options{})
+	mux.Handle("GET /ws", hub.Handler())
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	httpErr := make(chan error, 1)
@@ -103,6 +107,11 @@ func run() error {
 	log.Info("shutting down; stopping http server")
 	stopCtx, cancelStop := context.WithTimeout(context.WithoutCancel(sigCtx), httpStopTimeout)
 	defer cancelStop()
+	// http.Server.Shutdown does not wait for WebSocket connections, so close the
+	// hub first: every browser gets a "going away" close frame.
+	if err := hub.Close(stopCtx); err != nil {
+		log.Warn("websocket clients did not close in time", "error", err)
+	}
 	if err := srv.Shutdown(stopCtx); err != nil {
 		log.Warn("http server did not stop cleanly", "error", err)
 	}
