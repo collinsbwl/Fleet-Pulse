@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -499,5 +500,169 @@ func TestShutdownWithNothingBufferedIsQuick(t *testing.T) {
 	}
 	if len(sink.sizes()) != 0 || src.commits() != 0 {
 		t.Errorf("nothing should be written or committed when nothing was buffered")
+	}
+}
+
+// ---- publishing ----
+
+// journal records the order of events across the sink, the publisher and the
+// source's commit, so tests can check what happens before what.
+type journal struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (j *journal) add(e string) { j.mu.Lock(); j.events = append(j.events, e); j.mu.Unlock() }
+func (j *journal) list() []string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]string(nil), j.events...)
+}
+
+type journalSink struct {
+	j    *journal
+	fail []error
+}
+
+func (s *journalSink) WriteBatch(_ context.Context, ps []*fleetpulsev1.Position) error {
+	if len(s.fail) > 0 {
+		err := s.fail[0]
+		s.fail = s.fail[1:]
+		if err != nil {
+			s.j.add("write-failed")
+			return err
+		}
+	}
+	s.j.add(fmt.Sprintf("write:%d", len(ps)))
+	return nil
+}
+
+type journalPublisher struct {
+	j   *journal
+	got [][]*fleetpulsev1.Position
+}
+
+func (p *journalPublisher) Publish(ps []*fleetpulsev1.Position) {
+	p.j.add(fmt.Sprintf("publish:%d", len(ps)))
+	p.got = append(p.got, append([]*fleetpulsev1.Position(nil), ps...))
+}
+
+type journalSource struct {
+	*fakeSource
+	j *journal
+}
+
+func (s *journalSource) Commit(ctx context.Context, r []*kgo.Record) error {
+	s.j.add("commit")
+	return s.fakeSource.Commit(ctx, r)
+}
+
+func runWith(t *testing.T, src Source, sink Sink, opts Options, until func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(src, sink, quiet, opts).Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !until() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+}
+
+func TestPublishesAfterTheWriteAndBeforeTheCommit(t *testing.T) {
+	j := &journal{}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: recs(t, 0, 3)}}}, j: j}
+	pub := &journalPublisher{j: j}
+
+	runWith(t, src, &journalSink{j: j}, Options{MaxBatch: 3, FlushEvery: time.Hour, Publisher: pub},
+		func() bool { return len(j.list()) >= 3 })
+
+	want := []string{"write:3", "publish:3", "commit"}
+	if got := j.list(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	if len(pub.got) != 1 || pub.got[0][0].GetVehicleId() != "v-00000" {
+		t.Errorf("the publisher should get the batch's positions, got %v", pub.got)
+	}
+}
+
+func TestNeverPublishesABatchThatFailedToWrite(t *testing.T) {
+	j := &journal{}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}, j: j}
+	pub := &journalPublisher{j: j}
+	sink := &journalSink{j: j, fail: []error{errors.New("db down"), errors.New("db down"), nil}}
+
+	runWith(t, src, sink, Options{MaxBatch: 2, FlushEvery: time.Hour, RetryBackoff: time.Millisecond, Publisher: pub},
+		func() bool { return len(j.list()) >= 5 })
+
+	want := []string{"write-failed", "write-failed", "write:2", "publish:2", "commit"}
+	if got := j.list(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("want %v, got %v (nothing may be published until the write succeeds, and only once)", want, got)
+	}
+}
+
+func TestPublishesNothingWhileTheDatabaseStaysDown(t *testing.T) {
+	j := &journal{}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}, j: j}
+	pub := &journalPublisher{j: j}
+	sink := &journalSink{j: j}
+	for range 1000 {
+		sink.fail = append(sink.fail, errors.New("db down"))
+	}
+
+	runWith(t, src, sink, Options{MaxBatch: 2, FlushEvery: time.Hour, RetryBackoff: time.Millisecond, Publisher: pub},
+		func() bool { return len(j.list()) >= 5 })
+
+	for _, e := range j.list() {
+		if strings.HasPrefix(e, "publish") || e == "commit" {
+			t.Fatalf("with the database down nothing may be published or committed, saw %q in %v", e, j.list())
+		}
+	}
+}
+
+func TestDroppedRecordsAreNotPublished(t *testing.T) {
+	j := &journal{}
+	batch := []*kgo.Record{rec(t, 1), {Key: []byte("junk"), Value: []byte{0xff, 0xff}}, rec(t, 2)}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: batch}}}, j: j}
+	pub := &journalPublisher{j: j}
+
+	runWith(t, src, &journalSink{j: j}, Options{MaxBatch: 3, FlushEvery: time.Hour, Publisher: pub},
+		func() bool { return len(j.list()) >= 3 })
+
+	if len(pub.got) != 1 || len(pub.got[0]) != 2 {
+		t.Fatalf("only the 2 valid positions should be published, got %v", pub.got)
+	}
+}
+
+func TestTheFinalShutdownBatchIsPublishedToo(t *testing.T) {
+	j := &journal{}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}, j: j}
+	pub := &journalPublisher{j: j}
+
+	// Far from a full batch and no timer: only the shutdown flush can write it.
+	runWith(t, src, &journalSink{j: j}, Options{MaxBatch: 1000, FlushEvery: time.Hour, Publisher: pub},
+		func() bool { time.Sleep(50 * time.Millisecond); return true })
+
+	want := []string{"write:2", "publish:2", "commit"}
+	if got := j.list(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+}
+
+func TestPipelineWorksWithoutAPublisher(t *testing.T) {
+	j := &journal{}
+	src := &journalSource{fakeSource: &fakeSource{script: []pollResult{{recs: recs(t, 0, 2)}}}, j: j}
+
+	runWith(t, src, &journalSink{j: j}, Options{MaxBatch: 2, FlushEvery: time.Hour},
+		func() bool { return len(j.list()) >= 2 })
+
+	if got := j.list(); fmt.Sprint(got) != fmt.Sprint([]string{"write:2", "commit"}) {
+		t.Fatalf("want a write then a commit, got %v", got)
 	}
 }

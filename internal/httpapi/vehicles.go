@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/collinsbwl/Fleet-Pulse/internal/store"
+	"github.com/collinsbwl/Fleet-Pulse/internal/wire"
 )
 
 const vehiclesTimeout = 5 * time.Second
@@ -15,18 +16,6 @@ const vehiclesTimeout = 5 * time.Second
 // *store.Store satisfies it.
 type VehicleSource interface {
 	Latest(ctx context.Context) ([]store.Vehicle, error)
-}
-
-// vehicleJSON is the wire shape of one vehicle. It is kept apart from
-// store.Vehicle so renaming a database column never changes the API.
-type vehicleJSON struct {
-	ID          string    `json:"id"`
-	EventTime   time.Time `json:"event_time"` // RFC 3339, UTC
-	Lat         float64   `json:"lat"`
-	Lon         float64   `json:"lon"`
-	SpeedKph    float32   `json:"speed_kph"`
-	FuelPct     float32   `json:"fuel_pct"`
-	EngineTempC float32   `json:"engine_temp_c"`
 }
 
 // RegisterVehicles adds GET /vehicles to mux. It returns a JSON array with every
@@ -45,9 +34,9 @@ func RegisterVehicles(mux *http.ServeMux, src VehicleSource, log *slog.Logger) {
 			return
 		}
 
-		out := make([]vehicleJSON, len(latest))
+		out := make([]wire.Vehicle, len(latest))
 		for i, v := range latest {
-			out[i] = vehicleJSON{
+			out[i] = wire.Vehicle{
 				ID: v.ID, EventTime: v.EventTime.UTC(), Lat: v.Lat, Lon: v.Lon,
 				SpeedKph: v.SpeedKph, FuelPct: v.FuelPct, EngineTempC: v.EngineTempC,
 			}

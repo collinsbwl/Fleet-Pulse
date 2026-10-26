@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/collinsbwl/Fleet-Pulse/internal/config"
+	"github.com/collinsbwl/Fleet-Pulse/internal/feed"
 	"github.com/collinsbwl/Fleet-Pulse/internal/httpapi"
 	"github.com/collinsbwl/Fleet-Pulse/internal/kafka"
 	"github.com/collinsbwl/Fleet-Pulse/internal/pipeline"
@@ -34,6 +35,8 @@ var (
 	_ pipeline.Source       = (*kafka.Consumer)(nil)
 	_ pipeline.Sink         = (*store.Store)(nil)
 	_ httpapi.VehicleSource = (*store.Store)(nil)
+	_ pipeline.Publisher    = (*feed.Publisher)(nil)
+	_ feed.Hub              = (*ws.Hub)(nil)
 )
 
 func main() {
@@ -83,7 +86,6 @@ func run() error {
 	mux := http.NewServeMux()
 	health.Register(mux)
 	httpapi.RegisterVehicles(mux, db, log)
-	// Nothing broadcasts to the hub yet; T15 connects the pipeline to it.
 	hub := ws.NewHub(log, ws.Options{})
 	mux.Handle("GET /ws", hub.Handler())
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -101,7 +103,9 @@ func run() error {
 
 	// Blocks until shutdown. On the way out the pipeline stops reading and makes
 	// a final attempt to write and commit its buffered batch.
-	p := pipeline.New(consumer, db, log, pipeline.Options{})
+	// After each batch is safely written, the pipeline hands it to the publisher,
+	// which sends the newest position of each vehicle to every browser on /ws.
+	p := pipeline.New(consumer, db, log, pipeline.Options{Publisher: feed.NewPublisher(hub, log)})
 	runErr := p.Run(runCtx)
 
 	log.Info("shutting down; stopping http server")

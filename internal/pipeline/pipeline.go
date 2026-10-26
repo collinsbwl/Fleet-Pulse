@@ -27,8 +27,23 @@ type Sink interface {
 	WriteBatch(ctx context.Context, ps []*fleetpulsev1.Position) error
 }
 
+// Publisher is told about every batch once it has been written to the Sink.
+// *feed.Publisher satisfies it.
+//
+// Publish runs on the pipeline's own goroutine, so it must return quickly and
+// never block. It must not keep the slice or its elements after returning: the
+// pipeline reuses them for the next batch.
+type Publisher interface {
+	Publish(positions []*fleetpulsev1.Position)
+}
+
 // Options tune batching. Zero values take the defaults.
 type Options struct {
+	// Publisher, if set, receives each batch right after it is written. A batch
+	// that failed to write is never published, so a browser can't see a position
+	// the database doesn't have.
+	Publisher Publisher
+
 	MaxBatch     int           // flush once this many records are buffered (default 1000)
 	FlushEvery   time.Duration // flush this long after the first buffered record (default 250ms)
 	RetryBackoff time.Duration // first wait after a failed write; doubles up to 10s (default 1s)
@@ -175,6 +190,11 @@ func (p *Pipeline) flush(ctx context.Context, recs []*kgo.Record, positions []*f
 		if err == nil {
 			p.stats.Written += uint64(len(positions))
 			p.stats.Batches++
+			// Publish before committing: the commit can take a while and browsers
+			// shouldn't wait for it.
+			if p.opts.Publisher != nil && len(positions) > 0 {
+				p.opts.Publisher.Publish(positions)
+			}
 			p.log.Debug("batch written",
 				"records", len(recs), "positions", len(positions), "write_ms", time.Since(start).Milliseconds())
 			break
