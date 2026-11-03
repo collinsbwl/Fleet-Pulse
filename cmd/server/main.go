@@ -1,6 +1,6 @@
 // Command server consumes vehicle positions from Redpanda and stores them in
-// PostgreSQL. It serves health endpoints; later tasks add the WebSocket and
-// HTTP API and metrics.
+// PostgreSQL. It serves the map page, the vehicles API, the live WebSocket feed
+// and health endpoints; later tasks add metrics.
 package main
 
 import (
@@ -22,6 +22,7 @@ import (
 	"github.com/collinsbwl/Fleet-Pulse/internal/store"
 	"github.com/collinsbwl/Fleet-Pulse/internal/telemetry"
 	"github.com/collinsbwl/Fleet-Pulse/internal/ws"
+	"github.com/collinsbwl/Fleet-Pulse/web"
 )
 
 const (
@@ -88,6 +89,7 @@ func run() error {
 	httpapi.RegisterVehicles(mux, db, log)
 	hub := ws.NewHub(log, ws.Options{})
 	mux.Handle("GET /ws", hub.Handler())
+	httpapi.RegisterStatic(mux, web.Files, cfg.MapboxToken)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	httpErr := make(chan error, 1)

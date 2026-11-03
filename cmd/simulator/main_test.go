@@ -72,3 +72,25 @@ func TestCountersFail(t *testing.T) {
 		t.Fatalf("last error: want %q, got %q", "broker unreachable", msg)
 	}
 }
+
+func TestParseIDs(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"v-00001", []string{"v-00001"}},
+		{" v-00001 , v-00002,,", []string{"v-00001", "v-00002"}},
+	}
+	for _, tt := range tests {
+		got := parseIDs(tt.in)
+		if len(got) != len(tt.want) {
+			t.Fatalf("parseIDs(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+		for _, id := range tt.want {
+			if !got[id] {
+				t.Errorf("parseIDs(%q) is missing %q", tt.in, id)
+			}
+		}
+	}
+}

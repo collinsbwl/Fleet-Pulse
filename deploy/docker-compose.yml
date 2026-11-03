@@ -95,6 +95,8 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
       POSTGRES_DSN: postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable
+      # From the repo-root .env (the Makefile passes it); blank disables the map.
+      MAPBOX_TOKEN: ${MAPBOX_TOKEN:-}
     healthcheck:
       # Ready means Postgres and Redpanda are both reachable. wget is in the Alpine image.
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Pulse</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.33.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.33.0/mapbox-gl.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #status {
+    position: absolute; top: 10px; left: 10px; padding: 6px 10px; border-radius: 6px;
+    background: rgba(255, 255, 255, 0.92); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  #status b { font-weight: 600; }
+  #dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #999; }
+  #dot.live { background: #1a9850; }
+  #dot.down { background: #d73027; }
+  #msg { position: absolute; inset: 0; display: none; place-items: center; text-align: center; padding: 24px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status"><span id="dot"></span><b id="count">0</b> vehicles · <span id="state">connecting</span></div>
+<div id="msg"></div>
+
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const fail = (text) => { const m = $('msg'); m.textContent = text; m.style.display = 'grid'; };
+
+  // The token comes from the server's environment, never from this file.
+  let token = '';
+  try {
+    token = (await (await fetch('/config')).json()).mapbox_token || '';
+  } catch (e) {
+    console.error('loading /config failed', e);
+  }
+  if (!token) { fail('No Mapbox token. Set MAPBOX_TOKEN in .env, then restart the server.'); return; }
+
+  mapboxgl.accessToken = token;
+  // London bounding box used by the simulator.
+  const map = new mapboxgl.Map({
+    container: 'map',
+    style: 'mapbox://styles/mapbox/streets-v12',
+    bounds: [[-0.51, 51.28], [0.33, 51.69]],
+  });
+
+  // Latest reading per vehicle, keyed by id. Redelivered or older readings lose.
+  const vehicles = new Map();
+  let dirty = false;
+
+  const merge = (list) => {
+    for (const v of list) {
+      const old = vehicles.get(v.id);
+      if (!old || Date.parse(v.event_time) >= Date.parse(old.event_time)) vehicles.set(v.id, v);
+    }
+    dirty = true;
+  };
+
+  // A vehicle silent for longer than this is drawn grey.
+  const STALE_MS = 60 * 1000;
+
+  const toGeoJSON = () => {
+    const now = Date.now();
+    return {
+      type: 'FeatureCollection',
+      features: Array.from(vehicles.values(), (v) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [v.lon, v.lat] },
+        properties: {
+          id: v.id, speed_kph: v.speed_kph, fuel_pct: v.fuel_pct,
+          stale: now - Date.parse(v.event_time) > STALE_MS,
+        },
+      })),
+    };
+  };
+
+  // Redraw at most once per frame, however many messages arrived. A silent
+  // vehicle sends nothing to trigger a redraw, so also redraw every 5 s to age it.
+  let lastDraw = 0;
+  const draw = (t) => {
+    if (dirty || t - lastDraw > 5000) {
+      dirty = false;
+      lastDraw = t;
+      map.getSource('vehicles').setData(toGeoJSON());
+      $('count').textContent = vehicles.size;
+    }
+    requestAnimationFrame(draw);
+  };
+
+  const setState = (text, cls) => { $('state').textContent = text; $('dot').className = cls; };
+
+  async function loadSnapshot() {
+    const res = await fetch('/vehicles');
+    if (!res.ok) throw new Error('GET /vehicles ' + res.status);
+    merge(await res.json());
+  }
+
+  // Snapshot first, then the socket, so a reconnect cannot miss updates.
+  let retry = 0;
+  async function connect() {
+    try {
+      await loadSnapshot();
+    } catch (e) {
+      console.error(e);
+      return schedule();
+    }
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.onopen = () => { retry = 0; setState('live', 'live'); };
+    ws.onmessage = (e) => merge(JSON.parse(e.data));
+    ws.onclose = () => { setState('reconnecting', 'down'); schedule(); };
+  }
+  function schedule() {
+    const wait = Math.min(1000 * 2 ** retry++, 10000);
+    setTimeout(connect, wait);
+  }
+
+  map.on('load', () => {
+    map.addSource('vehicles', { type: 'geojson', data: toGeoJSON() });
+    map.addLayer({
+      id: 'vehicles',
+      type: 'circle',
+      source: 'vehicles',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 6],
+        'circle-color': ['case', ['get', 'stale'], '#9ca3af', '#2563eb'],
+        'circle-stroke-color': '#fff',
+        'circle-stroke-width': 0.5,
+      },
+    });
+    requestAnimationFrame(draw);
+    connect();
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,7 +1,8 @@
 .DEFAULT_GOAL := help
 
 GO_PKGS := ./...
-COMPOSE := docker compose -f deploy/docker-compose.yml
+# Compose reads .env from the compose file's folder, so pass the repo-root one explicitly.
+COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 BUF := docker run --rm --user "$$(id -u):$$(id -g)" -e BUF_CACHE_DIR=/tmp/buf \
 	-v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.73.0
 

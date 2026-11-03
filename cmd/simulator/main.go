@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -57,6 +58,7 @@ func run() error {
 	vehicles := flag.Int("vehicles", cfg.SimVehicles, "number of simulated vehicles")
 	rate := flag.Float64("rate", 1/cfg.SimInterval.Seconds(), "readings per second, per vehicle")
 	seed := flag.Uint64("seed", 0, "random seed for the fleet (0 picks one from the clock)")
+	freeze := flag.String("freeze", "", "comma-separated vehicle IDs that never report, to test stale-vehicle display")
 	flag.Parse()
 
 	if *vehicles < 1 {
@@ -85,11 +87,19 @@ func run() error {
 		"vehicles", *vehicles, "rate_hz", *rate, "interval", interval.String(),
 		"seed", *seed, "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic)
 
+	frozen := parseIDs(*freeze)
+	if len(frozen) > 0 {
+		log.Info("vehicles frozen: they will not report", "count", len(frozen))
+	}
+
 	var (
 		stats counters
 		wg    sync.WaitGroup
 	)
 	for _, v := range sim.NewFleet(*vehicles, sim.London, *seed) {
+		if frozen[v.ID] {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -142,6 +152,17 @@ func runVehicle(ctx context.Context, v *sim.Vehicle, p *kafka.Producer, interval
 			stats.sent.Add(1)
 		})
 	}
+}
+
+// parseIDs turns "a, b,,c" into the set {a, b, c}.
+func parseIDs(list string) map[string]bool {
+	ids := make(map[string]bool)
+	for _, id := range strings.Split(list, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
 // toPosition converts a vehicle's current state into the wire message.

@@ -34,6 +34,7 @@ func TestLoadOverrides(t *testing.T) {
 		"KAFKA_GROUP":   "group-test",
 		"POSTGRES_DSN":  "postgres://u:p@db:5432/x",
 		"HTTP_ADDR":     ":9999",
+		"MAPBOX_TOKEN":  "pk.test",
 		"SIM_VEHICLES":  "50000",
 		"SIM_INTERVAL":  "250ms",
 	}))
@@ -48,6 +49,7 @@ func TestLoadOverrides(t *testing.T) {
 		KafkaGroup:   "group-test",
 		PostgresDSN:  "postgres://u:p@db:5432/x",
 		HTTPAddr:     ":9999",
+		MapboxToken:  "pk.test",
 		SimVehicles:  50000,
 		SimInterval:  250 * time.Millisecond,
 	}
@@ -78,6 +80,7 @@ func TestLoadInvalid(t *testing.T) {
 	}{
 		{"bad log level", map[string]string{"LOG_LEVEL": "loud"}, []string{"LOG_LEVEL"}},
 		{"empty broker list", map[string]string{"KAFKA_BROKERS": " , ,"}, []string{"KAFKA_BROKERS"}},
+		{"secret mapbox token", map[string]string{"MAPBOX_TOKEN": "sk.secret"}, []string{"MAPBOX_TOKEN"}},
 		{"vehicles not a number", map[string]string{"SIM_VEHICLES": "lots"}, []string{"SIM_VEHICLES"}},
 		{"vehicles zero", map[string]string{"SIM_VEHICLES": "0"}, []string{"SIM_VEHICLES"}},
 		{"interval not a duration", map[string]string{"SIM_INTERVAL": "1"}, []string{"SIM_INTERVAL"}},
@@ -94,6 +97,9 @@ func TestLoadInvalid(t *testing.T) {
 			_, err := LoadFrom(env(tt.env))
 			if err == nil {
 				t.Fatal("expected an error, got nil")
+			}
+			if strings.Contains(err.Error(), "sk.secret") {
+				t.Errorf("error %q must not repeat the token", err)
 			}
 			for _, s := range tt.wantErr {
 				if !strings.Contains(err.Error(), s) {

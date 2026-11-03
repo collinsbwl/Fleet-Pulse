@@ -26,6 +26,8 @@ type Config struct {
 
 	HTTPAddr string // HTTP_ADDR: server listen address
 
+	MapboxToken string // MAPBOX_TOKEN: public "pk." token for the map; empty disables the map
+
 	SimVehicles int           // SIM_VEHICLES: number of simulated vehicles
 	SimInterval time.Duration // SIM_INTERVAL: time between readings per vehicle
 }
@@ -85,6 +87,14 @@ func LoadFrom(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if v, ok := get("HTTP_ADDR"); ok {
 		c.HTTPAddr = v
+	}
+	if v, ok := get("MAPBOX_TOKEN"); ok {
+		// A secret token must never reach a browser, so refuse anything but pk.
+		if !strings.HasPrefix(v, "pk.") {
+			errs = append(errs, errors.New("MAPBOX_TOKEN: want a public token starting with pk."))
+		} else {
+			c.MapboxToken = v
+		}
 	}
 	if v, ok := get("SIM_VEHICLES"); ok {
 		n, err := strconv.Atoi(v)
