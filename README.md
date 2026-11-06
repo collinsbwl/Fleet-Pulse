@@ -37,7 +37,7 @@ The server writes a batch to Postgres first and only then pushes it to browsers,
 | Redpanda | Kafka-compatible broker; `positions` has 6 partitions and 1 h retention |
 | `server` | Consumes `positions` in a consumer group, batch-writes to Postgres (retrying failed writes with backoff), pushes each batch's newest position per vehicle over WebSocket, serves `GET /vehicles`, `/metrics`, `/healthz` and `/readyz`, and degrades gracefully under overload |
 | PostgreSQL | `vehicles_latest` (current state per vehicle, never rolled back by a late message) and `positions_history` (every reading, deduplicated on `vehicle_id, event_ts`) |
-| `web/map.html` | Mapbox GL JS with clustering; vehicles silent for more than 60 s turn grey |
+| `web/map.html` | Mapbox GL JS; vehicles silent for more than 60 s turn grey |
 | Prometheus, Grafana | Metrics, recording rules, burn-rate alerts and dashboards provisioned as code |
 | OTel Collector, Jaeger | Receive and store traces |
 | Redpanda Console | Web UI for inspecting topics and consumer lag |
@@ -49,6 +49,7 @@ The server writes a batch to Postgres first and only then pushes it to browsers,
 **Prerequisites:** Docker Desktop or OrbStack (about 4 GB RAM free), Go 1.24+, and a free [Mapbox access token](https://account.mapbox.com/access-tokens/) set as `MAPBOX_TOKEN` (see `.env.example`).
 
 ```bash
+cp .env.example .env   # then paste your Mapbox public token into .env
 make up        # build and start the whole stack and create the topic
 make logs      # follow server and simulator logs
 make psql      # open a SQL shell on the fleet database
@@ -106,7 +107,7 @@ A load ramp steps from 1,000 to 50,000 vehicles and records throughput, lag, fre
 
 ```
 cmd/          simulator and server binaries (wiring only)
-internal/     shared packages: config, kafka, store, pipeline, feed, ws, httpapi, sim, telemetry, pb
+internal/     shared packages: config, kafka, store, pipeline, feed, ws, httpapi, wire, sim, telemetry, pb
 proto/        Protobuf schema
 web/          map page
 deploy/       Docker Compose, Dockerfile and per-container config
